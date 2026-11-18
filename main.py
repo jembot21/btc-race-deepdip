@@ -1,4 +1,21 @@
-"""DeepDip strategy for the make.fun 24-hour BTC race."""
+"""Trade cbBTC against USDC during the make.fun 24-hour BTC race.
+
+The SDK reads the hello handshake to initialize the session, then updates
+the account and calls the strategy for each minute's batch. The strategy
+processes fills and records each available CBBTC close, including during
+warmup. It sends no orders during warmup, before 30 closes, or on the final
+race bar. The SDK sends one reply per batch, with an empty list when there
+is no order.
+
+The dip entry requires a deep drop from the first close, a close near or
+above the level 20 closes ago, and an uptick from the previous close.
+A late momentum entry can also qualify after enough closes. These filters,
+the two-entry cap, and the cooldown after a sell keep trading infrequent.
+
+The hard stop and take-profit use the actual buy fill price. The stall exit
+looks for renewed weakness after five hours, and the maximum hold closes
+the position after ten hours when it is still open.
+"""
 
 import sys
 from pathlib import Path
@@ -64,20 +81,19 @@ class Strategy:
                 return []
 
             held = state.seq - self.entry_seq
+            # Hard stop.
             stopped = scaled_price <= self.entry_price * (BPS - STOP_BPS)
+            # Take-profit.
             target_reached = scaled_price // self.entry_price >= BPS + TP_BPS
+            # Stall exit.
             stalled = (
                 held >= STALL_AFTER
                 and len(self.closes) > STALL_WIN
                 and scaled_price < self.closes[-1 - STALL_WIN] * (BPS - STALL_BPS)
             )
+            # Maximum hold.
             if stopped or target_reached or stalled or held >= MAX_HOLD:
-                return [{
-                    "side": "sell",
-                    "symbol": SYMBOL,
-                    "qty": position.qty,
-                    "max_slippage_bps": MAX_SLIPPAGE_BPS,
-                }]
+                return self._sell_all(position)
             return []
 
         if self.entries >= MAX_ENTRIES or state.seq < self.cooldown_until:
@@ -93,15 +109,27 @@ class Strategy:
             and scaled_price > self.closes[-1 - MOM_WIN] * (BPS + MOM_BPS)
         )
         if stabilized_dip or late_momentum:
-            notional = min(state.cash * SIZE_BPS // BPS, state.weight_room(SYMBOL))
-            minimum = int(state.hello["fees"]["min_notional_quote_units"])
-            if notional >= minimum:
-                return [{
-                    "side": "buy",
-                    "symbol": SYMBOL,
-                    "notional_quote_units": notional,
-                    "max_slippage_bps": MAX_SLIPPAGE_BPS,
-                }]
+            return self._buy(state)
+        return []
+
+    def _sell_all(self, position):
+        return [{
+            "side": "sell",
+            "symbol": SYMBOL,
+            "qty": position.qty,
+            "max_slippage_bps": MAX_SLIPPAGE_BPS,
+        }]
+
+    def _buy(self, state):
+        notional = min(state.cash * SIZE_BPS // BPS, state.weight_room(SYMBOL))
+        minimum = int(state.hello["fees"]["min_notional_quote_units"])
+        if notional >= minimum:
+            return [{
+                "side": "buy",
+                "symbol": SYMBOL,
+                "notional_quote_units": notional,
+                "max_slippage_bps": MAX_SLIPPAGE_BPS,
+            }]
         return []
 
 
